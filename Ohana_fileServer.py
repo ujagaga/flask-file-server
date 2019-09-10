@@ -1,30 +1,40 @@
-from flask import Flask, make_response, request, session, render_template, send_file, Response
+from flask import Flask, make_response, request, render_template, send_file, Response, redirect
 from flask.views import MethodView
 from werkzeug import secure_filename
-from datetime import datetime
+from datetime import datetime, timedelta
 import humanize
 import os
 import re
 import stat
 import json
 import mimetypes
+import sys
+
+# Configuration
+USER_PASSWORD = 'pass123'       # access password
+LOCK_MINUTES = 5                # minutes to lock for when wrong password is entered 3 times
+ROOT = os.path.expanduser('~')  # folder to list unless one is provided as a parameter
 
 app = Flask(__name__, static_url_path='/assets', static_folder='assets')
-root = os.path.expanduser('~')
-
 ignored = ['.bzr', '$RECYCLE.BIN', '.DAV', '.DS_Store', '.git', '.hg', '.htaccess', '.htpasswd', '.Spotlight-V100', '.svn', '__MACOSX', 'ehthumbs.db', 'robots.txt', 'Thumbs.db', 'thumbs.tps']
 datatypes = {'audio': 'm4a,mp3,oga,ogg,webma,wav', 'archive': '7z,zip,rar,gz,tar', 'image': 'gif,ico,jpe,jpeg,jpg,png,svg,webp', 'pdf': 'pdf', 'quicktime': '3g2,3gp,3gp2,3gpp,mov,qt', 'source': 'atom,bat,bash,c,cmd,coffee,css,hml,js,json,java,less,markdown,md,php,pl,py,rb,rss,sass,scpt,swift,scss,sh,xml,yml,plist', 'text': 'txt', 'video': 'mp4,m4v,ogv,webm', 'website': 'htm,html,mhtm,mhtml,xhtm,xhtml'}
 icontypes = {'fa-music': 'm4a,mp3,oga,ogg,webma,wav', 'fa-archive': '7z,zip,rar,gz,tar', 'fa-picture-o': 'gif,ico,jpe,jpeg,jpg,png,svg,webp', 'fa-file-text': 'pdf', 'fa-film': '3g2,3gp,3gp2,3gpp,mov,qt', 'fa-code': 'atom,plist,bat,bash,c,cmd,coffee,css,hml,js,json,java,less,markdown,md,php,pl,py,rb,rss,sass,scpt,swift,scss,sh,xml,yml', 'fa-file-text-o': 'txt', 'fa-film': 'mp4,m4v,ogv,webm', 'fa-globe': 'htm,html,mhtm,mhtml,xhtm,xhtml'}
 
+failed_logins = 0
+login_list = {}
+
+
 @app.template_filter('size_fmt')
 def size_fmt(size):
     return humanize.naturalsize(size)
+
 
 @app.template_filter('time_fmt')
 def time_desc(timestamp):
     mdate = datetime.fromtimestamp(timestamp)
     str = mdate.strftime('%Y-%m-%d %H:%M:%S')
     return str
+
 
 @app.template_filter('data_fmt')
 def data_fmt(filename):
@@ -34,6 +44,7 @@ def data_fmt(filename):
             t = type
     return t
 
+
 @app.template_filter('icon_fmt')
 def icon_fmt(filename):
     i = 'fa-file-o'
@@ -42,10 +53,12 @@ def icon_fmt(filename):
             i = icon
     return i
 
+
 @app.template_filter('humanize')
 def time_humanize(timestamp):
     mdate = datetime.utcfromtimestamp(timestamp)
     return humanize.naturaltime(mdate)
+
 
 def get_type(mode):
     if stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
@@ -53,6 +66,7 @@ def get_type(mode):
     else:
         type = 'file'
     return type
+
 
 def partial_response(path, start, end=None):
     file_size = os.path.getsize(path)
@@ -83,6 +97,7 @@ def partial_response(path, start, end=None):
     )
     return response
 
+
 def get_range(request):
     range = request.headers.get('Range')
     m = re.match('bytes=(?P<start>\d+)-(?P<end>\d+)?', range)
@@ -96,11 +111,21 @@ def get_range(request):
     else:
         return 0, None
 
+
 class PathView(MethodView):
+    global login_list
+
     def get(self, p=''):
+        client_ip = request.remote_addr
+        client_data = login_list.get(client_ip,
+                                     {'tstamp': (datetime.now() - timedelta(minutes=(LOCK_MINUTES + 1))), 'failed': 0,
+                                      'loginok': False})
+        if not client_data['loginok']:
+            return redirect("/login")
+
         hide_dotfile = request.args.get('hide-dotfile', request.cookies.get('hide-dotfile', 'no'))
 
-        path = os.path.join(root, p)
+        path = os.path.join(ROOT, p)
         if os.path.isdir(path):
             contents = []
             total = {'size': 0, 'dir': 0, 'file': 0}
@@ -136,7 +161,14 @@ class PathView(MethodView):
         return res
 
     def post(self, p=''):
-        path = os.path.join(root, p)
+        client_ip = request.remote_addr
+        client_data = login_list.get(client_ip,
+                                     {'tstamp': (datetime.now() - timedelta(minutes=(LOCK_MINUTES + 1))), 'failed': 0,
+                                      'loginok': False})
+        if not client_data['loginok']:
+            return "ERROR: Please login first"
+
+        path = os.path.join(ROOT, p)
         info = {}
         if os.path.isdir(path):
             files = request.files.getlist('files[]')
@@ -156,6 +188,55 @@ class PathView(MethodView):
         res = make_response(json.JSONEncoder().encode(info), 200)
         res.headers.add('Content-type', 'application/json')
         return res
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    global USER_PASSWORD
+    global LOCK_MINUTES
+    global login_list
+
+    if request.method == 'POST':
+        password = request.form.get("password")
+        client_ip = request.remote_addr
+
+        client_data = login_list.get(client_ip, {'tstamp': (datetime.now()-timedelta(minutes=(LOCK_MINUTES + 1))), 'failed': 0, 'loginok': False})
+
+        target_url = "login"
+        message = ""
+
+        if (datetime.now() - client_data["tstamp"]).seconds > (LOCK_MINUTES * 60):
+            client_data['failed'] = 0
+
+        if password == USER_PASSWORD and client_data['failed'] < 3:
+            client_data['loginok'] = True
+            client_data['failed'] = 0
+            login_list[client_ip] = client_data
+            return redirect("/")
+        else:
+            client_data['loginok'] = False
+            client_data['failed'] += 1
+            client_data['tstamp'] = datetime.now()
+            login_list[client_ip] = client_data
+
+            if client_data['failed'] == 1:
+                message = 'ERROR: Wrong password!'
+            elif client_data['failed'] == 2:
+                message = 'ERROR: Wrong password second time. One more and we will lock up the server.'
+            elif client_data['failed'] > 2:
+                message = 'ERROR: Wrong password too many times. The server is temporarely locked. Please try again later.'
+
+            return render_template('login.html', message=message)
+
+    else:
+        return render_template('login.html')
+
+
+if len(sys.argv) > 1:
+    start_folder = sys.argv[1]
+
+    if os.path.isdir(start_folder):
+        ROOT = start_folder
 
 path_view = PathView.as_view('path_view')
 app.add_url_rule('/', view_func=path_view)
