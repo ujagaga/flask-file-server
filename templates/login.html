@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <title>Login</title>
+  <link rel="stylesheet" href="{{url_for('static', filename='css/listr.pack.css')}}">
+</head>
+<body dir="ltr">
+  <div class="container">
+    <div class="row">
+      <div class="col-xs-12 col-sm-5 col-md-4">
+        <div class="form-group">
+          <form name="loginfrm" method="POST" action="/login" autocomplete="off">      
+            <center>  
+              {% if message %} <p style="color: red;">{{message}}</p> {% endif %}
+              <br>
+              <br>
+              <input type = "password" name = "password" placeholder="Password" class="form-control"/>
+              <input type = "submit" value="Login">     
+            </center>  
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+
+
