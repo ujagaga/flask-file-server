@@ -1,19 +1,32 @@
-from flask import Flask, make_response, request, render_template, send_file, Response, redirect
+#!/usr/bin/env python3
+
+from flask import Flask, make_response, request, render_template, send_file, Response, redirect, send_from_directory
 from flask.views import MethodView
 from werkzeug import secure_filename
 from datetime import datetime, timedelta
 import humanize
-import os
 import re
 import stat
 import json
 import mimetypes
 import sys
+import shutil
+import random
+import string
+import os
+import time
+
 
 # Configuration
-USER_PASSWORD = 'pass123'       # access password
+USER_PASSWORD = 'mypassword123'       # access password
 LOCK_MINUTES = 5                # minutes to lock for when wrong password is entered 3 times
-ROOT = os.path.expanduser('~')  # folder to list unless one is provided as a parameter
+
+ROOT = os.path.expanduser('~') # folder to list unless one is provided as a parameter
+
+SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
+SHAREABLE_URL_LEN = 13
+SHARED_FILES = os.path.join(SCRIPT_PATH, "shared.db")
+SHARE_LINK_TTL = 60*60*24
 
 app = Flask(__name__, static_url_path='/assets', static_folder='assets')
 ignored = ['.bzr', '$RECYCLE.BIN', '.DAV', '.DS_Store', '.git', '.hg', '.htaccess', '.htpasswd', '.Spotlight-V100', '.svn', '__MACOSX', 'ehthumbs.db', 'robots.txt', 'Thumbs.db', 'thumbs.tps']
@@ -112,20 +125,152 @@ def get_range(request):
         return 0, None
 
 
+def get_shareable_link(file_path):
+    quicklink = None
+
+    if os.path.isfile(os.path.join(ROOT, file_path)):
+
+        file_urls = {}
+
+        if os.path.isfile(SHARED_FILES):
+            f = open(SHARED_FILES, "r")
+            lines = f.readlines()
+            f.close()
+
+            for line in lines:
+                data = line.split('=')
+                if len(data) == 3:
+                    path = data[0].strip()
+                    if os.path.exists(os.path.join(ROOT, path)):
+                        file_urls[path] = {'qurl': data[1], 'timestamp': data[2].strip()}
+
+        letters = string.ascii_lowercase
+        quicklink = ''.join(random.choice(letters) for i in range(SHAREABLE_URL_LEN))
+        timestamp = f"{time.time():.0f}"
+
+        file_urls[file_path] = {'qurl': quicklink, 'timestamp': timestamp}
+
+        f = open(SHARED_FILES, "w")
+        for relative_path in file_urls.keys():
+            data = file_urls[relative_path]
+            print("DATA: ".format(data))
+            if (time.time() - int(data['timestamp'])) < SHARE_LINK_TTL:
+                f.write("{0}={1}={2}\n".format(relative_path, data['qurl'], data['timestamp']))
+        f.close()
+
+    return quicklink
+
+
+def get_file_from_shareable_link(quicklink):
+
+    if (len(quicklink) == SHAREABLE_URL_LEN) and os.path.isfile(SHARED_FILES):
+        f = open(SHARED_FILES, "r")
+        lines = f.readlines()
+        f.close()
+
+        for line in lines:
+            data = line.split('=')
+            if len(data) == 2:
+                file_path = data[0].strip()
+                if (quicklink == data[1].strip()) and os.path.isfile(os.path.join(ROOT, file_path)):
+                    return file_path
+    return None
+
+
+def zipdir(path, ziph):
+    # ziph is zipfile handle
+    for root, dirs, files in os.walk(path):
+        for file in files:
+            ziph.write(os.path.join(root, file))
+
+
 class PathView(MethodView):
     global login_list
 
     def get(self, p=''):
         client_ip = request.remote_addr
-        client_data = login_list.get(client_ip,
-                                     {'tstamp': (datetime.now() - timedelta(minutes=(LOCK_MINUTES + 1))), 'failed': 0,
-                                      'loginok': False})
-        if not client_data['loginok']:
-            return redirect("/login")
 
-        hide_dotfile = request.args.get('hide-dotfile', request.cookies.get('hide-dotfile', 'no'))
+        quicklink_result = get_file_from_shareable_link(p)
 
-        path = os.path.join(ROOT, p)
+        if quicklink_result is not None:
+            absolute_path = os.path.join(ROOT, quicklink_result)
+            file_path, file_name = os.path.split(absolute_path)
+
+            return send_from_directory(file_path, file_name, as_attachment=True)
+        else:
+            client_data = login_list.get(client_ip,
+                                         {'tstamp': (datetime.now() - timedelta(minutes=(LOCK_MINUTES + 1))), 'failed': 0,
+                                          'loginok': False})
+            if not client_data['loginok']:
+                return redirect("/login")
+
+        hide_dotfile = request.args.get('hide-dotfile', request.cookies.get('hide-dotfile', 'yes'))
+
+        if p == "favicon.ico":
+            path = os.path.join(SCRIPT_PATH, p)
+        else:
+            path = os.path.join(ROOT, p)
+
+        # Check if an action is requested
+        action = request.args.get('action', '')
+        if action != '':
+            item_name = request.args.get('name', '')
+            item_parent = request.args.get('path', '')
+
+            item_path = os.path.join(ROOT, item_parent)
+            relative_path = os.path.join(item_parent, item_name)
+            absolute_path = os.path.join(item_path, item_name)
+            share = ""
+            error_msg = ""
+            status = 0
+
+            if len(item_name) > 1:
+                if action == "new":
+                    if not os.path.isdir(item_path):
+                        status = 1
+                        error_msg = "Path not found: {}".format(item_path)
+                    elif os.path.isdir(absolute_path):
+                        status = 1
+                        error_msg = "Target already exists: {}".format(absolute_path)
+                    else:
+                        os.mkdir(absolute_path)
+
+                elif action == "del":
+                    if not os.path.exists(absolute_path):
+                        status = 1
+                        error_msg = "Path not found: {}".format(absolute_path)
+                    else:
+                        try:
+                            if os.path.isdir(absolute_path):
+                                print("Removing: ", absolute_path)
+                                shutil.rmtree(absolute_path)
+                            else:
+                                os.remove(absolute_path)
+                        except Exception as e:
+                            status = 1
+                            error_msg = "{}".format(e)
+
+                elif action == "share":
+                    if not os.path.exists(absolute_path):
+                        status = 1
+                        error_msg = "Path not found: {}".format(absolute_path)
+                    else:
+                        share = get_shareable_link(relative_path)
+
+                elif action == "archive":
+                    if not os.path.isdir(absolute_path):
+                        status = 1
+                        error_msg = "Path is not a folder: {}".format(absolute_path)
+                    else:
+                        shutil.make_archive(absolute_path + '_archived', 'zip', absolute_path)
+            else:
+                status = 1
+                error_msg = "Path not complete. Parent is: {0}, Item is: {1}".format(item_parent, item_name)
+
+            res = make_response(json.JSONEncoder().encode({'status': status, 'error': error_msg, 'share': share}), 200)
+            return res
+
+        # Serve the requested item
         if os.path.isdir(path):
             contents = []
             total = {'size': 0, 'dir': 0, 'file': 0}
@@ -134,18 +279,23 @@ class PathView(MethodView):
                     continue
                 if hide_dotfile == 'yes' and filename[0] == '.':
                     continue
-                filepath = os.path.join(path, filename)
-                stat_res = os.stat(filepath)
-                info = {}
-                info['name'] = filename
-                info['mtime'] = stat_res.st_mtime
-                ft = get_type(stat_res.st_mode)
-                info['type'] = ft
-                total[ft] += 1
-                sz = stat_res.st_size
-                info['size'] = sz
-                total['size'] += sz
-                contents.append(info)
+
+                try:
+                    filepath = os.path.join(path, filename)
+                    stat_res = os.stat(filepath)
+                    info = {}
+                    info['name'] = filename
+                    info['mtime'] = stat_res.st_mtime
+                    ft = get_type(stat_res.st_mode)
+                    info['type'] = ft
+                    total[ft] += 1
+                    sz = stat_res.st_size
+                    info['size'] = sz
+                    total['size'] += sz
+                    contents.append(info)
+                except:
+                    continue
+
             page = render_template('index.html', path=p, contents=contents, total=total, hide_dotfile=hide_dotfile)
             res = make_response(page, 200)
             res.set_cookie('hide-dotfile', hide_dotfile, max_age=16070400)
@@ -232,6 +382,53 @@ def login():
         return render_template('login.html')
 
 
+@app.route('/logout', methods=['GET'])
+def logout():
+    global login_list
+
+    client_ip = request.remote_addr
+    client_data = login_list.get(client_ip,
+                                 {'tstamp': (datetime.now() - timedelta(minutes=(LOCK_MINUTES + 1))), 'failed': 0,
+                                  'loginok': False})
+    client_data['loginok'] = False
+    login_list[client_ip] = client_data
+
+    return render_template('login.html')
+
+
+@app.route('/admin', methods=['GET'])
+def admin():
+    cmd = request.args.get('cmd', '')
+    password = request.args.get('password', '')
+    client_ip = request.remote_addr
+
+    client_data = login_list.get(client_ip,
+                                 {'tstamp': (datetime.now() - timedelta(minutes=(LOCK_MINUTES + 1))), 'failed': 0,
+                                  'loginok': False})
+
+    if password == USER_PASSWORD and client_data['failed'] < 3:
+        if cmd == "shutdown":
+            func = request.environ.get('werkzeug.server.shutdown')
+            func()
+            message = 'Server shutting down!'
+        else:
+            message = 'Error: command not implemented!'
+    else:
+        client_data['loginok'] = False
+        client_data['failed'] += 1
+        client_data['tstamp'] = datetime.now()
+        login_list[client_ip] = client_data
+
+        if client_data['failed'] == 2:
+            message = 'ERROR: Wrong password second time. One more and we will lock up the server.'
+        elif client_data['failed'] > 2:
+            message = 'ERROR: Wrong password too many times. The server is temporarely locked. Please try again later.'
+        else:
+            message = 'ERROR: Wrong password!'
+
+    return make_response(json.JSONEncoder().encode({'msg': message}), 200)
+
+
 if len(sys.argv) > 1:
     start_folder = sys.argv[1]
 
@@ -242,4 +439,7 @@ path_view = PathView.as_view('path_view')
 app.add_url_rule('/', view_func=path_view)
 app.add_url_rule('/<path:p>', view_func=path_view)
 
-app.run('0.0.0.0', 8888, threaded=True, debug=False)
+try:
+    app.run('0.0.0.0', 8888, threaded=True, debug=False)
+except Exception as e:
+    print("ERROR: Port not available.")

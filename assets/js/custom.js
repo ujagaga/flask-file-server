@@ -64,3 +64,134 @@ $(document).ready(function(){
         $('#filer_input').prop("jFiler").reset()
     });
 });
+
+var curPath = document.getElementById("dirpath").value;
+var target;
+
+function copyToClipboard(stringtext) {
+    var dummy = document.createElement("input");
+    document.body.appendChild(dummy);
+    dummy.setAttribute("id", "dummy_id");
+    dummy.value=stringtext;
+    dummy.select();
+    document.execCommand("copy");
+    document.body.removeChild(dummy);
+}
+
+function msgBox(msg)
+{
+    var el = document.createElement("div");
+    el.setAttribute("style","position:absolute;bottom:20px;right:20px;background:#e5e5e5;border-radius: 5px;" +
+                            "border-radius:3px;box-shadow: 1px 1px 4px rgba(0,0,0,.2);padding:1em;");
+    el.innerHTML = msg;
+    setTimeout(
+        function(){ el.parentNode.removeChild(el); },
+        4000
+    );
+    document.body.appendChild(el);
+}
+
+function download(){
+    url = target
+    document.getElementById('my_iframe').src = url;
+}
+
+function queryServer(action){
+
+    if( ((action == "del") && confirm("Really delete\n" + curPath + target)) ||
+        (action != "del")){
+
+        $.ajax({
+            type: "GET",
+            url: window.location.protocol + "//" + window.location.host,
+            cache: false,
+            data: {
+                    action: action,
+                    path: curPath,
+                    name: target
+                },
+            success: function (response) {
+                try {
+                    var resp = JSON.parse(response);
+                    if(resp.status == 0){
+                        if(resp.share.length > 1){
+                            var url = window.location.protocol + '//' + window.location.hostname + ':' + window.location.port + '/' + resp.share;
+                            copyToClipboard(url);
+                            msgBox("Copied to clipboard shareable link:<br>" + url);
+
+                        }else{
+                            location.reload(true);
+                        }
+                    }else{
+                        console.log("Error: " + resp.error);
+                    }
+                }
+                catch (e) {
+                    //alert('Error: no communication to main function');
+                }
+            },
+            error: function () {
+                //alert('Error: Lost connection to the server:');
+            }
+        });
+    }
+}
+
+function getFolderName(){
+    var x;
+    var name = prompt("Please type folder name.","");
+    if (name != null){
+        target = name;
+        queryServer("new");
+    }
+}
+
+var menu = document.querySelector('.menu');
+
+function showMenu(x, y, itemType){
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+    menu.classList.add('show-menu');
+
+    if(itemType == "dir"){
+        document.getElementById("share-menu").style.display = "none";
+        document.getElementById("archive-menu").style.display = "block";
+        document.getElementById("download-menu").style.display = "none";
+
+    }else{
+        document.getElementById("share-menu").style.display = "block";
+        document.getElementById("archive-menu").style.display = "none";
+        document.getElementById("download-menu").style.display = "block";
+    }
+}
+
+function hideMenu(){
+    menu.classList.remove('show-menu');
+    target = null;
+}
+
+function onContextMenu(e){
+    targetParent = event.target.parentElement;
+    try {
+        var classes = targetParent.className.split(' ');
+        if(classes[0] == "item-row"){
+            e.preventDefault();
+            target = targetParent.id;
+
+            var itemType = classes[1].split("-")[0];
+            showMenu(e.pageX, e.pageY, itemType);
+            document.addEventListener('click', onClick, false);
+        }
+    }catch(err){
+        //console.log(err.message);
+    }
+}
+
+function onClick(e){
+    hideMenu();
+    document.removeEventListener('click', onClick);
+}
+
+document.addEventListener('contextmenu', onContextMenu, false);
+
+
